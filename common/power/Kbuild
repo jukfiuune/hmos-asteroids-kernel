@@ -1,0 +1,2 @@
+obj-m := kstate.o
+ccflags-y := -I$(srctree)/drivers/android

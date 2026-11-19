@@ -1,0 +1,32 @@
+diff --git a/qcom/opensource/wlan/platform/icnss2/main.c b/qcom/opensource/wlan/platform/icnss2/main.c
+index 3b8ba99..11b2198 100644
+--- a/qcom/opensource/wlan/platform/icnss2/main.c
++++ b/qcom/opensource/wlan/platform/icnss2/main.c
+@@ -1027,7 +1027,10 @@ static int icnss_setup_dms_mac(struct icnss_priv *priv)
+ 	 * Thus assert on failure to get MAC from DMS even after retries
+ 	 */
+ 	if (priv->use_nv_mac) {
+-		for (i = 0; i < ICNSS_DMS_QMI_CONNECTION_WAIT_RETRY; i++) {
++		/* asteroids: no modem, so no DMS to wait for: its 200 retries held Wi-Fi up for ~27 s at boot, past
++		 * wifi_manager_service's one auto-start, which then left Wi-Fi off. Ask once (above) and go on.
++		 */
++		for (i = 0; i < 0; i++) {
+ 			if (priv->dms.mac_valid)
+ 				break;
+ 
+@@ -1036,10 +1039,12 @@ static int icnss_setup_dms_mac(struct icnss_priv *priv)
+ 				break;
+ 			msleep(ICNSS_DMS_QMI_CONNECTION_WAIT_MS);
+ 		}
++		/* asteroids: the modem (and its DMS service) is not running on HarmonyOS, so the NV MAC cannot come
++		 * from it; carry on without it (the firmware then reports the chip's own MAC).
++		 */
+ 		if (!priv->dms.nv_mac_not_prov && !priv->dms.mac_valid) {
+-			icnss_pr_err("Unable to get MAC from DMS after retries\n");
+-			ICNSS_ASSERT(0);
+-			return -EINVAL;
++			icnss_pr_err("Unable to get MAC from DMS after retries, continuing without it\n");
++			return 0;
+ 		}
+ 	}
+ qmi_send:

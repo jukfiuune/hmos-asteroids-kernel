@@ -1,0 +1,102 @@
+diff --git a/drivers/misc/haptic/haptic_drv.c b/drivers/misc/haptic/haptic_drv.c
+index 8d7d6dac6..ef1db08c7 100644
+--- a/drivers/misc/haptic/haptic_drv.c
++++ b/drivers/misc/haptic/haptic_drv.c
+@@ -1685,11 +1685,20 @@ static void load_chip_config(const struct firmware *config_fw, void *context)
+ static void chip_init_work_routine(struct work_struct *work)
+ {
+ 	struct ics_haptic_data *haptic_data = container_of(work, struct ics_haptic_data, chip_init_work.work);
++	const struct firmware *config_fw = NULL;
+ 
+ 	haptic_data->chip_initialized = false;
+-	request_firmware_nowait(THIS_MODULE, FW_ACTION_UEVENT,
+-		haptic_config_name, haptic_data->dev, GFP_KERNEL,
+-		haptic_data, load_chip_config);
++	/* asteroids: the config is in HarmonyOS /vendor/firmware, which the kernel only sees once HarmonyOS init has
++	 * taken over the root (the module loads earlier), so look again every 2 s for 3 minutes instead of failing once. */
++	if (firmware_request_nowarn(&config_fw, haptic_config_name, haptic_data->dev) < 0)
++	{
++		if (++haptic_data->chip_init_tries < 90)
++			schedule_delayed_work(&haptic_data->chip_init_work, msecs_to_jiffies(2000));
++		else
++			ics_err("%s: no %s, chip left uninitialized\n", __func__, haptic_config_name);
++		return;
++	}
++	load_chip_config(config_fw, haptic_data);
+ }
+ 
+ static void initialize_chip(struct ics_haptic_data *haptic_data)
+@@ -1877,7 +1886,6 @@ static int ics_haptic_probe(struct i2c_client *client, const struct i2c_device_i
+ 		goto probe_err;
+ 	}
+ 	mutex_init(&haptic_data->daq_lock);
+-	initialize_chip(haptic_data);
+ 	INIT_WORK(&haptic_data->brake_guard_work, brake_guard_work_routine);
+ 
+ 	// register irq handler
+@@ -1906,6 +1914,7 @@ static int ics_haptic_probe(struct i2c_client *client, const struct i2c_device_i
+ 	if (ret < 0)
+ 	{
+ 		ics_err("%s: failed to initialize richtap device! ret = %d\n", __func__, ret);
++		sfdc_misc_remove(haptic_data);
+ 		goto probe_err;
+ 	}
+ #endif
+@@ -1917,16 +1926,19 @@ static int ics_haptic_probe(struct i2c_client *client, const struct i2c_device_i
+ #endif
+ 
+ #if IS_ENABLED(CONFIG_PROC_FS)
++	/* asteroids: a module loaded before this one (the stock build) leaves /proc/haptic behind when it is removed */
++	remove_proc_subtree("haptic", NULL);
+ 	haptic_proc_dir =  proc_mkdir("haptic", NULL);
+ 	if(!haptic_proc_dir){
+ 		pr_err("haptic proc dir creates failed !!\n");
+-		return -ENOMEM;
+-	}
++	} else {
+ 	g_haptic_data = haptic_data;
+ 	proc_create_data("f0", 0664, haptic_proc_dir, &haptic_f0_fops, haptic_data);
+ 	proc_create_data("lra_resistance", 0664, haptic_proc_dir, &haptic_lra_resistance_fops, haptic_data);
+ 	proc_create_data("gpp", 0664, haptic_proc_dir, &haptic_gpp_fops, haptic_data);
++	}
+ #endif
++	initialize_chip(haptic_data);
+ 
+ 	return 0;
+ 
+@@ -1962,6 +1974,12 @@ static void ics_haptic_remove(struct i2c_client *client)
+ {
+ 	struct ics_haptic_data *haptic_data = i2c_get_clientdata(client);
+ 
++	/* asteroids: stop the pending chip init and drop /proc/haptic, so the driver can be bound again */
++	cancel_delayed_work_sync(&haptic_data->chip_init_work);
++#if IS_ENABLED(CONFIG_PROC_FS)
++	proc_remove(haptic_proc_dir);
++	haptic_proc_dir = NULL;
++#endif
+ #if IS_ENABLED(CONFIG_ICS_HAPTIC_DRV_RICHTAP)
+ 	richtap_misc_remove(haptic_data);
+ #endif
+@@ -1970,9 +1988,9 @@ static void ics_haptic_remove(struct i2c_client *client)
+ 	cancel_work_sync(&haptic_data->vibrator_work);
+ 	cancel_work_sync(&haptic_data->brake_guard_work);
+ #ifdef ICS_INPUT_FRAMEWORK
++	input_unregister_device(haptic_data->input_dev);
+ 	cancel_work_sync(&haptic_data->input_vibrator_work);
+ 	destroy_workqueue(haptic_data->input_work_queue);
+-	input_unregister_device(haptic_data->input_dev);
+ #endif
+ 	hrtimer_cancel(&haptic_data->timer);
+ 	mutex_destroy(&haptic_data->lock);
+diff --git a/drivers/misc/haptic/haptic_drv.h b/drivers/misc/haptic/haptic_drv.h
+index 21810347d..5e94674d4 100644
+--- a/drivers/misc/haptic/haptic_drv.h
++++ b/drivers/misc/haptic/haptic_drv.h
+@@ -126,6 +126,7 @@ struct ics_haptic_data
+ 	struct ics_haptic_func *func;
+ 	//
+ 	bool chip_initialized;
++	int chip_init_tries;
+ 	bool stream_start;
+ 	struct kfifo stream_fifo;
+ 	uint8_t *gp_buf;
